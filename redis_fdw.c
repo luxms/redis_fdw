@@ -91,6 +91,7 @@ static struct RedisFdwOption valid_options[] =
 	{"tablekeyprefix", ForeignTableRelationId},
 	{"tablekeyset", ForeignTableRelationId},
 	{"tabletype", ForeignTableRelationId},
+	{"keyexpire", ForeignTableRelationId},
 
 	/* Sentinel */
 	{NULL, InvalidOid}
@@ -114,6 +115,7 @@ typedef struct redisTableOptions
 	char	   *keyprefix;
 	char	   *keyset;
 	char	   *singleton_key;
+	int        keyexpire;
 	redis_table_type table_type;
 } redisTableOptions;
 
@@ -145,6 +147,7 @@ typedef struct RedisFdwExecutionState
 	char	   *keyset;
 	char	   *qual_value;
 	char	   *singleton_key;
+	int         keyexpire;
 	redis_table_type table_type;
 	char	   *cursor_search_string;
 	char	   *cursor_id;
@@ -162,6 +165,7 @@ typedef struct RedisFdwModifyState
 	char	   *keyset;
 	char	   *qual_value;
 	char	   *singleton_key;
+	int         keyexpire;
 	Relation	rel;
 	redis_table_type table_type;
 	List	   *target_attrs;
@@ -313,6 +317,7 @@ redis_fdw_validator(PG_FUNCTION_ARGS)
 	char	   *tablekeyprefix = NULL;
 	char	   *tablekeyset = NULL;
 	char	   *singletonkey = NULL;
+	int         keyexpire = 0;
 	ListCell   *cell;
 
 #ifdef DEBUG
@@ -491,6 +496,22 @@ redis_fdw_validator(PG_FUNCTION_ARGS)
 						 errmsg("invalid tabletype (%s) - must be hash, "
 								"list, set or zset", typeval)));
 		}
+		else if (strcmp(def->defname, "keyexpire") == 0)
+		{
+			if(tabletype != PG_REDIS_SCALAR_TABLE)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("invalid tabletype for option keyexpire. "
+								"Only SCALAR is supported")));
+			if (keyexpire)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options: keyexpire (%s)",
+								defGetString(def))
+						 ));
+
+			keyexpire = atoi(defGetString(def));
+		}
 	}
 
 	PG_RETURN_VOID();
@@ -574,6 +595,9 @@ redisGetOptions(Oid foreigntableid, redisTableOptions *table_options)
 		if (strcmp(def->defname, "singleton_key") == 0)
 			table_options->singleton_key = defGetString(def);
 
+		if (strcmp(def->defname, "keyexpire") == 0)
+			table_options->keyexpire = atoi(defGetString(def));
+
 		if (strcmp(def->defname, "tabletype") == 0)
 		{
 			char	   *typeval = defGetString(def);
@@ -599,6 +623,9 @@ redisGetOptions(Oid foreigntableid, redisTableOptions *table_options)
 
 	if (!table_options->database)
 		table_options->database = 0;
+
+	if (!table_options->keyexpire)
+		table_options->keyexpire = 0;
 }
 
 
@@ -632,6 +659,7 @@ redisGetForeignRelSize(PlannerInfo *root,
 	table_options.keyprefix = NULL;
 	table_options.keyset = NULL;
 	table_options.singleton_key = NULL;
+	table_options.keyexpire = 0; /* this one is not used here in the redisGetForeignRelSize anyway */
 	table_options.table_type = PG_REDIS_SCALAR_TABLE;
 
 	redisGetOptions(foreigntableid, &table_options);
@@ -921,6 +949,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	table_options.keyprefix = NULL;
 	table_options.keyset = NULL;
 	table_options.singleton_key = NULL;
+	table_options.keyexpire = 0;
 	table_options.table_type = PG_REDIS_SCALAR_TABLE;
 
 
@@ -1013,6 +1042,7 @@ redisBeginForeignScan(ForeignScanState *node, int eflags)
 	festate->keyprefix = table_options.keyprefix;
 	festate->keyset = table_options.keyset;
 	festate->singleton_key = table_options.singleton_key;
+	festate->keyexpire = table_options.keyexpire;
 	festate->table_type = table_options.table_type;
 	festate->cursor_id = NULL;
 	festate->cursor_search_string = NULL;
@@ -1859,6 +1889,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	table_options.keyprefix = NULL;
 	table_options.keyset = NULL;
 	table_options.singleton_key = NULL;
+	table_options.keyexpire = 0;
 	table_options.table_type = PG_REDIS_SCALAR_TABLE;
 
 
@@ -1875,6 +1906,7 @@ redisBeginForeignModify(ModifyTableState *mtstate,
 	fmstate->keyprefix = table_options.keyprefix;
 	fmstate->keyset = table_options.keyset;
 	fmstate->singleton_key = table_options.singleton_key;
+	fmstate->keyexpire = table_options.keyexpire;
 	fmstate->table_type = table_options.table_type;
 	fmstate->target_attrs = (List *) list_nth(fdw_private, 0);
 
@@ -2176,8 +2208,16 @@ redisExecForeignInsert(EState *estate,
 		switch (fmstate->table_type)
 		{
 			case PG_REDIS_SCALAR_TABLE:
-				sreply = redisCommand(context, "SET %s %s",
-									  fmstate->singleton_key, keyval);
+				if (fmstate->keyexpire) {
+					sreply = redisCommand(context, "SET %s %s EX %d", 
+									      fmstate->singleton_key, keyval,
+										  fmstate->keyexpire);
+				}
+				else {
+					sreply = redisCommand(context, "SET %s %s",
+									      fmstate->singleton_key, keyval);
+				}
+				
 				break;
 			case PG_REDIS_SET_TABLE:
 				sreply = redisCommand(context, "SADD %s %s",
@@ -2318,8 +2358,16 @@ redisExecForeignInsert(EState *estate,
 		switch (fmstate->table_type)
 		{
 			case PG_REDIS_SCALAR_TABLE:
-				sreply = redisCommand(context, "SET %s %s",
-									  keyval, valueval);
+				if (fmstate->keyexpire) {
+					sreply = redisCommand(context, "SET %s %s EX %d", 
+									      keyval, valueval,
+										  fmstate->keyexpire);
+				}
+				else {
+					sreply = redisCommand(context, "SET %s %s",
+										  keyval, valueval);
+				}
+				
 				check_reply(sreply, context,
 							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"could not add key %s", keyval);
@@ -2375,6 +2423,7 @@ redisExecForeignInsert(EState *estate,
 						check_reply(sreply, context,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add key %s", hk);
+
 						freeReplyObject(sreply);
 					}
 				}
@@ -2692,7 +2741,15 @@ redisExecForeignUpdate(EState *estate,
 
 			if (newval && fmstate->table_type == PG_REDIS_SCALAR_TABLE)
 			{
-				ereply = redisCommand(context, "SET %s %s", newkey, newval);
+				if (fmstate->keyexpire) {
+					ereply = redisCommand(context, "SET %s %s EX %d", 
+									      newkey, newval,
+										  fmstate->keyexpire);
+				}
+				else {
+					ereply = redisCommand(context, "SET %s %s",
+										  newkey, newval);
+				}
 
 				check_reply(ereply, context,
 							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2722,12 +2779,20 @@ redisExecForeignUpdate(EState *estate,
 			switch (fmstate->table_type)
 			{
 				case PG_REDIS_SCALAR_TABLE:
-					ereply = redisCommand(context, "SET %s %s",
+					if (fmstate->keyexpire) {
+						ereply = redisCommand(context, "SET %s %s EX %d", 
+									      fmstate->singleton_key, newkey,
+										  fmstate->keyexpire);
+					} else {
+						ereply = redisCommand(context, "SET %s %s",
 										  fmstate->singleton_key, newkey);
+					}
+
 					check_reply(ereply, context,
 								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 								"setting value %s", newkey);
 					freeReplyObject(ereply);
+
 					break;
 				case PG_REDIS_SET_TABLE:
 					ereply = redisCommand(context, "SREM %s %s",
@@ -2815,7 +2880,17 @@ redisExecForeignUpdate(EState *estate,
 		if (!fmstate->singleton_key)
 		{
 			Assert(fmstate->table_type == PG_REDIS_SCALAR_TABLE);
-			ereply = redisCommand(context, "SET %s %s", keyval, newval);
+			if (fmstate->keyexpire) {
+				ereply = redisCommand(context, "SET %s %s EX %d", keyval, newval, fmstate->keyexpire);
+			}
+			else {
+				ereply = redisCommand(context, "SET %s %s", keyval, newval);
+			}
+
+			check_reply(ereply, context,
+					ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+					"setting key %s", keyval);
+			freeReplyObject(ereply);
 		}
 		else
 		{
@@ -2827,12 +2902,12 @@ redisExecForeignUpdate(EState *estate,
 									  fmstate->singleton_key, keyval, newval);
 			else
 				elog(ERROR, "impossible update");		/* should not happen */
-		}
 
-		check_reply(ereply, context,
+			check_reply(ereply, context,
 					ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 					"setting key %s", keyval);
-		freeReplyObject(ereply);
+			freeReplyObject(ereply);
+		}
 	}
 
 	if (array_vals)
