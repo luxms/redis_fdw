@@ -18,7 +18,7 @@ MODULE_big = redis_fdw
 OBJS = redis_fdw.o
 
 EXTENSION = redis_fdw
-DATA = redis_fdw--1.0.sql
+DATA = redis_fdw--1.0.1.sql
 
 REGRESS = redis_fdw
 REGRESS_OPTS = --inputdir=test --outputdir=test \

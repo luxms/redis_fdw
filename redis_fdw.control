@@ -14,6 +14,6 @@
 ##########################################################################
 
 comment = 'Foreign data wrapper for querying a Redis server'
-default_version = '1.0'
+default_version = '1.0.1'
 module_pathname = '$libdir/redis_fdw'
 relocatable = true

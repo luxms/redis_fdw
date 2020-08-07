@@ -498,11 +498,11 @@ redis_fdw_validator(PG_FUNCTION_ARGS)
 		}
 		else if (strcmp(def->defname, "keyexpire") == 0)
 		{
-			if(tabletype != PG_REDIS_SCALAR_TABLE)
+			if (tabletype != PG_REDIS_SCALAR_TABLE && tabletype != PG_REDIS_SET_TABLE)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("invalid tabletype for option keyexpire. "
-								"Only SCALAR is supported")));
+						 errmsg("invalid tabletype for option keyexpire."
+								"Only set tabletype is supported. Or just don't specify tabletype to use scalar keys.")));
 			if (keyexpire)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
@@ -2222,6 +2222,16 @@ redisExecForeignInsert(EState *estate,
 			case PG_REDIS_SET_TABLE:
 				sreply = redisCommand(context, "SADD %s %s",
 									  fmstate->singleton_key, keyval);
+				if (fmstate->keyexpire) {
+					check_reply(sreply, context, ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+							    "cannot insert value for key %s", keyval);
+					freeReplyObject(sreply);
+					
+					// supported only in KeyDB
+					sreply = redisCommand(context, "EXPIREMEMBER %s %s %d",
+									      fmstate->singleton_key, keyval, 
+										  fmstate->keyexpire);
+				}
 				break;
 			case PG_REDIS_LIST_TABLE:
 				sreply = redisCommand(context, "RPUSH %s %s",
@@ -2387,6 +2397,16 @@ redisExecForeignInsert(EState *estate,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add set member %s", valueval);
 						freeReplyObject(sreply);
+
+						if (fmstate->keyexpire) {
+							// supported only in KeyDB
+							sreply = redisCommand(context, "EXPIREMEMBER %s %s %d",
+									      keyval, valueval, fmstate->keyexpire);
+							check_reply(sreply, context, 
+										ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+							    		"cannot set expire for member %s", valueval);
+							freeReplyObject(sreply);
+						}
 					}
 				}
 				break;
@@ -2469,6 +2489,17 @@ redisExecForeignInsert(EState *estate,
 						ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 						"could not add keyset element %s", valueval);
 			freeReplyObject(sreply);
+
+			if (fmstate->keyexpire) {
+				// supported only in KeyDB
+				sreply = redisCommand(context, "EXPIREMEMBER %s %s %d",
+								      fmstate->keyset, keyval, 
+									  fmstate->keyexpire);
+				check_reply(sreply, context, 
+							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+							"cannot set expire for keyset element %s", valueval);
+				freeReplyObject(sreply);
+			}
 		}
 	}
 	return slot;
@@ -2772,7 +2803,19 @@ redisExecForeignUpdate(EState *estate,
 				check_reply(ereply, context,
 							ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 							"adding keyset element %s", newkey);
-				freeReplyObject(ereply);			}
+				freeReplyObject(ereply);
+
+				if (fmstate->keyexpire) {
+					// supported only in KeyDB
+					ereply = redisCommand(context, "EXPIREMEMBER %s %s %d",
+										fmstate->keyset, newkey, 
+										fmstate->keyexpire);
+					check_reply(ereply, context, 
+								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+								"cannot set expire for keyset element %s", newkey);
+					freeReplyObject(ereply);
+				}		
+			}
 		}
 		else	/* is a singleton */
 		{
@@ -2807,6 +2850,17 @@ redisExecForeignUpdate(EState *estate,
 								ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 								"setting value %s", newkey);
 					freeReplyObject(ereply);
+
+					if (fmstate->keyexpire) {
+						// supported only in KeyDB
+						ereply = redisCommand(context, "EXPIREMEMBER %s %s %d",
+											fmstate->singleton_key, newkey, 
+											fmstate->keyexpire);
+						check_reply(ereply, context, 
+									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+									"cannot set expire for value %s", newkey);
+						freeReplyObject(ereply);
+					}
 					break;
 				case PG_REDIS_ZSET_TABLE:
 					{
@@ -2935,6 +2989,17 @@ redisExecForeignUpdate(EState *estate,
 									ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
 									"could not add element %s", array_vals[i]);
 						freeReplyObject(ereply);
+
+						if (fmstate->keyexpire) {
+							// supported only in KeyDB
+							ereply = redisCommand(context, "EXPIREMEMBER %s %s %d",
+												newkey, array_vals[i], 
+												fmstate->keyexpire);
+							check_reply(ereply, context, 
+										ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+										"cannot set expire for element %s", array_vals[i]);
+							freeReplyObject(ereply);
+						}
 					}
 				}
 				break;
